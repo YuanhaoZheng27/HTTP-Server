@@ -1,0 +1,6 @@
+# ingore all .txt file
+*.txt
+
+# ignore ide configuration file
+.idea/
+cmake-build-debug/
