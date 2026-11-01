@@ -122,14 +122,14 @@ int main()
         NI_MAXSERV,
         0);
 
-    if (result)
-    {
-        cout << host << " connected on " << svc << endl;
-    }
-    else
+    if (result != 0)
     {
         inet_ntop(AF_INET, &client.sin_addr, host, NI_MAXHOST);
         cout << host << " connected on " << ntohs(client.sin_port) << endl;
+    }
+    else
+    {
+        cout << host << " connected on " << svc << endl;
     }
 
     // While receiving- display message, echo message
@@ -143,6 +143,7 @@ int main()
         if (bytesRecv == -1)
         {
             cerr << "There  was a connection issue" << endl;
+            break;
         }
 
         if (bytesRecv == 0)
@@ -155,7 +156,41 @@ int main()
         cout << "Received: " << string(buf, 0, bytesRecv) << endl;
 
         // Resend message
-        send (clientSocket, buf, bytesRecv + 1, 0);
+        ssize_t totalSent = 0;
+
+        while (totalSent < bytesRecv)
+        {
+            ssize_t bytesSent = send(
+                clientSocket,
+                buf + totalSent,
+                bytesRecv - totalSent,
+                MSG_NOSIGNAL
+                );
+
+            if (bytesSent == -1)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+
+                cerr << "There was a sending issue" << endl;
+                break;
+            }
+
+            if (bytesSent == 0)
+            {
+                cout << "No data was sent" << endl;
+                break;
+            }
+
+            totalSent += bytesSent;
+        }
+
+        if (totalSent < bytesRecv)
+        {
+            break;
+        }
     }
 
     // Close socket
