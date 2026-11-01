@@ -12,24 +12,77 @@ using namespace std;
 int main()
 {
     // Create a socket
+    /*
     int listening = socket(AF_INET, SOCK_STREAM, 0);
     if (listening == -1)
     {
         cerr << "Can't create socket!";
         return -1;
     }
+    */
+    int status;
+    struct addrinfo hints;
+    struct addrinfo *servinfo;
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    status = getaddrinfo(
+        nullptr,
+        "54000",
+        &hints,
+        &servinfo
+        );
+
+    if (status != 0)
+    {
+        cerr << "getaddrinfo error: " << gai_strerror(status) << endl;
+        return -1;
+    }
+
+    int listening = socket(
+        servinfo->ai_family,
+        servinfo->ai_socktype,
+        servinfo->ai_protocol
+        );
+
+    if (listening == -1)
+    {
+        cerr << "Can't create socket!" << endl;
+        freeaddrinfo(servinfo);
+        return -1;
+    }
 
     // Bind the socket to a IP / port
-    sockaddr_in hint;
+    /*sockaddr_in hint;
     hint.sin_family = AF_INET;
     hint.sin_port = htons(54000);
     inet_pton(AF_INET, "0.0.0.0", &hint.sin_addr);
 
-    if (::bind(listening, (sockaddr*)&hint, sizeof(hint)) == -1)
+    if (::bind(
+        listening,
+        (sockaddr*)&hint,
+        sizeof(hint)
+        ) == -1)
     {
         cerr << "Can't bind to IP/port";
         return -2;
     }
+    */
+    if (::bind(listening,
+        servinfo->ai_addr,
+        servinfo->ai_addrlen
+        ) == -1)
+    {
+        cerr << "Can't bind to IP/port" << endl;
+        close(listening);
+        freeaddrinfo(servinfo);
+        return -2;
+    }
+
+    freeaddrinfo(servinfo);
 
     // Mark the socket for listening in
     if (listen(listening, SOMAXCONN) == -1)
