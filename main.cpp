@@ -12,14 +12,6 @@ using namespace std;
 int main()
 {
     // Create a socket
-    /*
-    int listening = socket(AF_INET, SOCK_STREAM, 0);
-    if (listening == -1)
-    {
-        cerr << "Can't create socket!";
-        return -1;
-    }
-    */
     int status;
     struct addrinfo hints;
     struct addrinfo *servinfo;
@@ -56,21 +48,6 @@ int main()
     }
 
     // Bind the socket to a IP / port
-    /*sockaddr_in hint;
-    hint.sin_family = AF_INET;
-    hint.sin_port = htons(54000);
-    inet_pton(AF_INET, "0.0.0.0", &hint.sin_addr);
-
-    if (::bind(
-        listening,
-        (sockaddr*)&hint,
-        sizeof(hint)
-        ) == -1)
-    {
-        cerr << "Can't bind to IP/port";
-        return -2;
-    }
-    */
     if (::bind(listening,
         servinfo->ai_addr,
         servinfo->ai_addrlen
@@ -88,113 +65,127 @@ int main()
     if (listen(listening, SOMAXCONN) == -1)
     {
         cerr << "Can't listen!";
+        close(listening);
         return -3;
     }
 
-    // Accept a call
-    sockaddr_in client;
-    socklen_t clientSize = sizeof(client);
-    char host[NI_MAXHOST];
-    char svc[NI_MAXSERV];
-
-    int clientSocket = accept(listening,
-        (sockaddr*)&client,
-        &clientSize
-        );
-
-    if (clientSocket == -1)
-    {
-        cerr << "Problem with client connecting!";
-        return -4;
-    }
-
-    // Close the listening socket
-    close(listening);
-
-    memset(host, 0, NI_MAXHOST);
-    memset(svc, 0, NI_MAXSERV);
-
-    int result = getnameinfo((sockaddr*)&client,
-        sizeof(client),
-        host,
-        NI_MAXHOST,
-        svc,
-        NI_MAXSERV,
-        0);
-
-    if (result != 0)
-    {
-        inet_ntop(AF_INET, &client.sin_addr, host, NI_MAXHOST);
-        cout << host << " connected on " << ntohs(client.sin_port) << endl;
-    }
-    else
-    {
-        cout << host << " connected on " << svc << endl;
-    }
-
-    // While receiving- display message, echo message
-    char buf[4096];
+    // Accept sequential connections
     while (true)
     {
-        // Clear the buffer
-        memset(buf, 0, 4096);
-        // Wait for a message
-        int bytesRecv = recv(clientSocket, buf, 4096, 0);
-        if (bytesRecv == -1)
+        sockaddr_in client;
+        socklen_t clientSize = sizeof(client);
+        char host[NI_MAXHOST];
+        char svc[NI_MAXSERV];
+
+        int clientSocket = accept(listening,
+            (sockaddr*)&client,
+            &clientSize
+            );
+
+        if (clientSocket == -1)
         {
-            cerr << "There  was a connection issue" << endl;
-            break;
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            
+            cerr << "Problem with client connecting!";
+            return -4;
         }
 
-        if (bytesRecv == 0)
+        memset(host, 0, NI_MAXHOST);
+        memset(svc, 0, NI_MAXSERV);
+
+        int result = getnameinfo((sockaddr*)&client,
+            sizeof(client),
+            host,
+            NI_MAXHOST,
+            svc,
+            NI_MAXSERV,
+            0);
+
+        if (result != 0)
         {
-            cout << "The Client disconnected" << endl;
-            break;
+            inet_ntop(AF_INET, &client.sin_addr, host, NI_MAXHOST);
+            cout << host << " connected on " << ntohs(client.sin_port) << endl;
+        }
+        else
+        {
+            cout << host << " connected on " << svc << endl;
         }
 
-        // Display message
-        cout << "Received: " << string(buf, 0, bytesRecv) << endl;
-
-        // Resend message
-        ssize_t totalSent = 0;
-
-        while (totalSent < bytesRecv)
+        // While receiving- display message, echo message
+        char buf[4096];
+        while (true)
         {
-            ssize_t bytesSent = send(
-                clientSocket,
-                buf + totalSent,
-                bytesRecv - totalSent,
-                MSG_NOSIGNAL
-                );
-
-            if (bytesSent == -1)
+            // Clear the buffer
+            memset(buf, 0, 4096);
+            // Wait for a message
+            int bytesRecv = recv(clientSocket, buf, 4096, 0);
+            if (bytesRecv == -1)
             {
                 if (errno == EINTR)
                 {
                     continue;
                 }
 
-                cerr << "There was a sending issue" << endl;
+                cerr << "There  was a connection issue" << endl;
                 break;
             }
 
-            if (bytesSent == 0)
+            if (bytesRecv == 0)
             {
-                cout << "No data was sent" << endl;
+                cout << "The Client disconnected" << endl;
                 break;
             }
 
-            totalSent += bytesSent;
+            // Display message
+            cout << "Received: " << string(buf, 0, bytesRecv) << endl;
+
+            // Resend message
+            ssize_t totalSent = 0;
+
+            while (totalSent < bytesRecv)
+            {
+                ssize_t bytesSent = send(
+                    clientSocket,
+                    buf + totalSent,
+                    bytesRecv - totalSent,
+                    MSG_NOSIGNAL
+                    );
+
+                if (bytesSent == -1)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+
+                    cerr << "There was a sending issue" << endl;
+                    break;
+                }
+
+                if (bytesSent == 0)
+                {
+                    cout << "No data was sent" << endl;
+                    break;
+                }
+
+                totalSent += bytesSent;
+            }
+
+            if (totalSent < bytesRecv)
+            {
+                break;
+            }
         }
 
-        if (totalSent < bytesRecv)
-        {
-            break;
-        }
+        // Close socket
+        close(clientSocket);
     }
 
-    // Close socket
-    close(clientSocket);
+    // Close listening
+    close(listening);
 
     return 0;
 }
