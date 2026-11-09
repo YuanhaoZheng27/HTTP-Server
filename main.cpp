@@ -6,6 +6,9 @@
 #include <arpa/inet.h>
 #include <string.h>
 #include <string>
+#include <sys/epoll.h>
+#include <fcntl.h>
+#include <cerrno>
 
 using namespace std;
 
@@ -69,123 +72,211 @@ int main()
         return -3;
     }
 
+    // Create epoll instance
+    int epollFD = epoll_create1(0);
+
+    if (epollFD == -1)
+    {
+        cerr << "Failed to create epoll instance!" << endl;
+        close(listening);
+        return -5;
+    }
+
+    // Set listening socket to non-blocking
+    int flags = fcntl(listening, F_GETFL, 0);
+
+    if (flags == -1)
+    {
+        cerr << "Failed to get socket flags" << endl;
+        close(epollFD);
+        close(listening);
+        return -6;
+    }
+
+    if (fcntl(listening, F_SETFL, flags | O_NONBLOCK) == -1)
+    {
+        cerr << "Failed to set socket flags!" << endl;
+        close(epollFD);
+        close(listening);
+        return -7;
+    }
+
+    // Register listening socket with epoll
+    struct epoll_event event{};
+
+    event.events = EPOLLIN;
+    event.data.fd = listening;
+
+    if (epoll_ctl(epollFD, EPOLL_CTL_ADD, listening, &event) == -1)
+    {
+        cerr << "Failed to register listening socket with epoll!" << endl;
+        close(epollFD);
+        close(listening);
+        return -8;
+    }
+
+    // Create an array to store ready events
+    constexpr int MAX_EVENTS = 10;
+    epoll_event events[MAX_EVENTS];
+
     // Accept sequential connections
     while (true)
     {
-        sockaddr_in client;
-        socklen_t clientSize = sizeof(client);
-        char host[NI_MAXHOST];
-        char svc[NI_MAXSERV];
-
-        int clientSocket = accept(listening,
-            (sockaddr*)&client,
-            &clientSize
+        int eventCount = epoll_wait(
+            epollFD,
+            events,
+            MAX_EVENTS,
+            -1
             );
 
-        if (clientSocket == -1)
+        if (eventCount == -1)
         {
             if (errno == EINTR)
             {
                 continue;
             }
-            
-            cerr << "Problem with client connecting!";
-            return -4;
+
+            cerr << "epoll_wait failed!" << endl;
+            break;
         }
 
-        memset(host, 0, NI_MAXHOST);
-        memset(svc, 0, NI_MAXSERV);
-
-        int result = getnameinfo((sockaddr*)&client,
-            sizeof(client),
-            host,
-            NI_MAXHOST,
-            svc,
-            NI_MAXSERV,
-            0);
-
-        if (result != 0)
+        for (int i = 0; i < eventCount; i++)
         {
-            inet_ntop(AF_INET, &client.sin_addr, host, NI_MAXHOST);
-            cout << host << " connected on " << ntohs(client.sin_port) << endl;
-        }
-        else
-        {
-            cout << host << " connected on " << svc << endl;
-        }
+            int currentFD = events[i].data.fd;
 
-        // While receiving- display message, echo message
-        char buf[4096];
-        while (true)
-        {
-            // Clear the buffer
-            memset(buf, 0, 4096);
-            // Wait for a message
-            int bytesRecv = recv(clientSocket, buf, 4096, 0);
-            if (bytesRecv == -1)
+            if (currentFD == listening)
             {
-                if (errno == EINTR)
+                if (!(events[i].events & EPOLLIN))
                 {
+                    cerr << "Unexpected listening socket event" << endl;
                     continue;
                 }
 
-                cerr << "There  was a connection issue" << endl;
-                break;
-            }
+                sockaddr_in client;
+                socklen_t clientSize = sizeof(client);
+                char host[NI_MAXHOST];
+                char svc[NI_MAXSERV];
 
-            if (bytesRecv == 0)
-            {
-                cout << "The Client disconnected" << endl;
-                break;
-            }
-
-            // Display message
-            cout << "Received: " << string(buf, 0, bytesRecv) << endl;
-
-            // Resend message
-            ssize_t totalSent = 0;
-
-            while (totalSent < bytesRecv)
-            {
-                ssize_t bytesSent = send(
-                    clientSocket,
-                    buf + totalSent,
-                    bytesRecv - totalSent,
-                    MSG_NOSIGNAL
+                int clientSocket = accept(
+                    listening,
+                    (sockaddr*)&client,
+                    &clientSize
                     );
 
-                if (bytesSent == -1)
+                if (clientSocket == -1)
                 {
-                    if (errno == EINTR)
+                    if (errno == EINTR ||
+                        errno == EAGAIN ||
+                        errno == EWOULDBLOCK)
                     {
                         continue;
                     }
 
-                    cerr << "There was a sending issue" << endl;
-                    break;
+                    cerr << "Problem with client connecting!";
+                    return -4;
                 }
 
-                if (bytesSent == 0)
+                memset(host, 0, NI_MAXHOST);
+                memset(svc, 0, NI_MAXSERV);
+
+                int result = getnameinfo((sockaddr*)&client,
+                    sizeof(client),
+                    host,
+                    NI_MAXHOST,
+                    svc,
+                    NI_MAXSERV,
+                    0);
+
+                if (result != 0)
                 {
-                    cout << "No data was sent" << endl;
-                    break;
+                    inet_ntop(AF_INET, &client.sin_addr, host, NI_MAXHOST);
+                    cout << host << " connected on " << ntohs(client.sin_port) << endl;
+                }
+                else
+                {
+                    cout << host << " connected on " << svc << endl;
                 }
 
-                totalSent += bytesSent;
-            }
+                // While receiving- display message, echo message
+                char buf[4096];
+                while (true)
+                {
+                    // Clear the buffer
+                    memset(buf, 0, 4096);
+                    // Wait for a message
+                    int bytesRecv = recv(clientSocket, buf, 4096, 0);
+                    if (bytesRecv == -1)
+                    {
+                        if (errno == EINTR)
+                        {
+                            continue;
+                        }
 
-            if (totalSent < bytesRecv)
-            {
-                break;
+                        cerr << "There  was a connection issue" << endl;
+                        break;
+                    }
+
+                    if (bytesRecv == 0)
+                    {
+                        cout << "The Client disconnected" << endl;
+                        break;
+                    }
+
+                    // Display message
+                    cout << "Received: " << string(buf, 0, bytesRecv) << endl;
+
+                    // Resend message
+                    ssize_t totalSent = 0;
+
+                    while (totalSent < bytesRecv)
+                    {
+                        ssize_t bytesSent = send(
+                            clientSocket,
+                            buf + totalSent,
+                            bytesRecv - totalSent,
+                            MSG_NOSIGNAL
+                            );
+
+                        if (bytesSent == -1)
+                        {
+                            if (errno == EINTR)
+                            {
+                                continue;
+                            }
+
+                            cerr << "There was a sending issue" << endl;
+                            break;
+                        }
+
+                        if (bytesSent == 0)
+                        {
+                            cout << "No data was sent" << endl;
+                            break;
+                        }
+
+                        totalSent += bytesSent;
+                    }
+
+                    if (totalSent < bytesRecv)
+                    {
+                        break;
+                    }
+                }
+
+                // Close socket
+                close(clientSocket);
+
             }
         }
 
-        // Close socket
-        close(clientSocket);
+
     }
 
     // Close listening
     close(listening);
+
+    // Close epoll instance
+    close(epollFD);
 
     return 0;
 }
