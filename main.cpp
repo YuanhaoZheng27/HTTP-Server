@@ -9,6 +9,7 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <cerrno>
+#include <unordered_map>
 
 using namespace std;
 
@@ -119,6 +120,15 @@ int main()
     constexpr int MAX_EVENTS = 10;
     epoll_event events[MAX_EVENTS];
 
+    // Store per-client connection state
+    struct ClientState
+    {
+        string pendingSend;
+        bool readEOF = false;
+    };
+
+    unordered_map<int, ClientState> clients;
+
     // Accept sequential connections
     while (true)
     {
@@ -152,124 +162,241 @@ int main()
                     continue;
                 }
 
-                sockaddr_in client;
-                socklen_t clientSize = sizeof(client);
-                char host[NI_MAXHOST];
-                char svc[NI_MAXSERV];
-
-                int clientSocket = accept(
-                    listening,
-                    (sockaddr*)&client,
-                    &clientSize
-                    );
-
-                if (clientSocket == -1)
-                {
-                    if (errno == EINTR ||
-                        errno == EAGAIN ||
-                        errno == EWOULDBLOCK)
-                    {
-                        continue;
-                    }
-
-                    cerr << "Problem with client connecting!";
-                    return -4;
-                }
-
-                memset(host, 0, NI_MAXHOST);
-                memset(svc, 0, NI_MAXSERV);
-
-                int result = getnameinfo((sockaddr*)&client,
-                    sizeof(client),
-                    host,
-                    NI_MAXHOST,
-                    svc,
-                    NI_MAXSERV,
-                    0);
-
-                if (result != 0)
-                {
-                    inet_ntop(AF_INET, &client.sin_addr, host, NI_MAXHOST);
-                    cout << host << " connected on " << ntohs(client.sin_port) << endl;
-                }
-                else
-                {
-                    cout << host << " connected on " << svc << endl;
-                }
-
-                // While receiving- display message, echo message
-                char buf[4096];
                 while (true)
                 {
-                    // Clear the buffer
-                    memset(buf, 0, 4096);
-                    // Wait for a message
-                    int bytesRecv = recv(clientSocket, buf, 4096, 0);
-                    if (bytesRecv == -1)
+                    sockaddr_in client;
+                    socklen_t clientSize = sizeof(client);
+
+                    int clientSocket = accept(
+                        listening,
+                        (sockaddr*)&client,
+                        &clientSize
+                        );
+
+                    if (clientSocket == -1)
                     {
-                        if (errno == EINTR)
+                        if (errno == EINTR )
                         {
                             continue;
                         }
 
-                        cerr << "There  was a connection issue" << endl;
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
+                            break;
+                        }
+
+                        cerr << "Accept failed: " << strerror(errno) << endl;
                         break;
                     }
 
-                    if (bytesRecv == 0)
+                    int clientFlags = fcntl(clientSocket, F_GETFL, 0);
+
+                    if (clientFlags == -1 ||
+                        fcntl(clientSocket, F_SETFL, clientFlags | O_NONBLOCK) == -1)
                     {
-                        cout << "The Client disconnected" << endl;
-                        break;
+                        cerr << "Failed to set client socket non-blocking" << endl;
+                        close(clientSocket);
+                        continue;
                     }
 
-                    // Display message
-                    cout << "Received: " << string(buf, 0, bytesRecv) << endl;
+                    epoll_event clientEvent{};
 
-                    // Resend message
-                    ssize_t totalSent = 0;
+                    clientEvent.events = EPOLLIN | EPOLLRDHUP;
+                    clientEvent.data.fd = clientSocket;
 
-                    while (totalSent < bytesRecv)
-                    {
-                        ssize_t bytesSent = send(
+                    if (epoll_ctl(
+                            epollFD,
+                            EPOLL_CTL_ADD,
                             clientSocket,
-                            buf + totalSent,
-                            bytesRecv - totalSent,
-                            MSG_NOSIGNAL
-                            );
+                            &clientEvent
+                        ) == -1)
+                    {
+                        cerr << "Failed to register client socket" << endl;
+                        close(clientSocket);
+                        continue;
+                    }
 
-                        if (bytesSent == -1)
+                    clients.emplace(clientSocket, ClientState{});
+                    cout << "Client registered: FD " << clientSocket << endl;
+
+                    char host[NI_MAXHOST];
+                    char svc[NI_MAXSERV];
+                    memset(host, 0, NI_MAXHOST);
+                    memset(svc, 0, NI_MAXSERV);
+
+                    int result = getnameinfo(
+                        (sockaddr*)&client,
+                        sizeof(client),
+                        host,
+                        NI_MAXHOST,
+                        svc,
+                        NI_MAXSERV,
+                        0
+                        );
+
+                    if (result != 0)
+                    {
+                        inet_ntop(AF_INET, &client.sin_addr, host, NI_MAXHOST);
+                        cout << host << " connected on " << ntohs(client.sin_port) << endl;
+                    }
+                    else
+                    {
+                        cout << host << " connected on " << svc << endl;
+                    }
+                }
+            }
+            else
+            {
+                auto it = clients.find(currentFD);
+
+                if (it == clients.end())
+                {
+                    continue;
+                }
+
+                ClientState& state = it->second;
+                bool shouldClose = false;
+
+                // Handle client socket readable events
+                if (!state.readEOF &&
+                    (events[i].events & (EPOLLIN | EPOLLHUP | EPOLLRDHUP)))
+                {
+                    char buf[4096];
+
+                    while (true)
+                    {
+                        ssize_t bytesRecv = recv(
+                            currentFD,
+                            buf,
+                            sizeof(buf),
+                            0
+                        );
+
+                        if (bytesRecv > 0)
+                        {
+                            cout << "Received: " << string(buf, bytesRecv) << endl;
+
+                            // Save received data for echo
+                            state.pendingSend.append(buf, bytesRecv);
+                        }
+                        else if (bytesRecv == 0)
+                        {
+                            cout << "Client disconnected: FD " << currentFD << endl;
+
+                            state.readEOF = true;
+                            break;
+                        }
+                        else
                         {
                             if (errno == EINTR)
                             {
                                 continue;
                             }
 
-                            cerr << "There was a sending issue" << endl;
+                            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                            {
+                                break;
+                            }
+
+                            cerr << "recv failed: " << strerror(errno) << endl;
+
+                            shouldClose = true;
                             break;
                         }
+                    }
+                }
 
-                        if (bytesSent == 0)
+                // Handle socket errors
+                if (events[i].events & EPOLLERR)
+                {
+                    cerr << "Socket error: FD " << currentFD << endl;
+                    shouldClose = true;
+                }
+
+                // Send echo data
+                if (!shouldClose)
+                {
+                    while (!state.pendingSend.empty())
+                    {
+                        ssize_t bytesSent = send(
+                            currentFD,
+                            state.pendingSend.data(),
+                            state.pendingSend.size(),
+                            MSG_NOSIGNAL
+                        );
+
+                        if (bytesSent > 0)
                         {
-                            cout << "No data was sent" << endl;
+                            state.pendingSend.erase(0, bytesSent);
+                        }
+                        else if (bytesSent == 0)
+                        {
+                            cerr << "No data was sent" << endl;
+                            shouldClose = true;
                             break;
                         }
+                        else
+                        {
+                            if (errno == EINTR)
+                            {
+                                continue;
+                            }
 
-                        totalSent += bytesSent;
+                            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                            {
+                                break;
+                            }
+
+                            cerr << "There was a sending issue" << endl;
+                            shouldClose = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Close after sending all remaining data
+                if (state.readEOF && state.pendingSend.empty())
+                {
+                    shouldClose = true;
+                }
+
+                // Update epoll events
+                if (!shouldClose)
+                {
+                    epoll_event clientEvent{};
+                    clientEvent.data.fd = currentFD;
+
+                    if (!state.readEOF)
+                    {
+                        clientEvent.events = EPOLLIN | EPOLLRDHUP;
                     }
 
-                    if (totalSent < bytesRecv)
+                    if (!state.pendingSend.empty())
                     {
-                        break;
+                        clientEvent.events |= EPOLLOUT;
+                    }
+
+                    if (epoll_ctl(
+                            epollFD,
+                            EPOLL_CTL_MOD,
+                            currentFD,
+                            &clientEvent
+                        ) == -1)
+                    {
+                        cerr << "Failed to update client events" << endl;
+                        shouldClose = true;
                     }
                 }
 
                 // Close socket
-                close(clientSocket);
-
+                if (shouldClose)
+                {
+                    epoll_ctl(epollFD, EPOLL_CTL_DEL, currentFD, nullptr);
+                    close(currentFD);
+                    clients.erase(currentFD);
+                }
             }
         }
-
-
     }
 
     // Close listening
